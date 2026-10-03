@@ -1,0 +1,276 @@
+---
+title: "Ai Hallucination Legal Analysis"
+format: html
+---
+Author: Joy Zhang
+
+## Research Question
+
+As AI tools become more common in legal work, AI-generated errors may lead to severe consequences. In this research, we are investigating: How do the consequences of documented AI hallucination cases differ across legal fields, and how to predict how severe the consequence is. 
+
+I examine this question in two ways. First, I compare the probability of professional sanctions across legal fields to see if there's a field that AI performance is particularly better or worse. Second, among cases with monetary penalties reported in USD, I use a regression model to study which case characteristics are associated with larger penalties.
+
+
+## Data loading
+
+```{r}
+#| message: false
+# with package installed
+library(tidyverse)
+library(lubridate)
+
+raw_data <- read_csv("hallucination_cases.csv")
+
+# names(raw_data)
+```
+
+## Data Wrangling
+The original dataset contains several variables stored as text. For better analysis, I create binary, categorical, and numerical variables for the analysis.
+
+```{r}
+data <- raw_data |>
+  transmute(
+    
+    # sanction, alleged, vendor_disputed, change the char to binary set
+    sanction = ifelse(`Professional Sanction` == "Yes", 1, 0),
+    alleged = ifelse(Alleged == "Yes", 1, 0),
+    vendor_disputed = ifelse(`Vendor Disputed` == "Yes", 1, 0),
+
+    # For data tool analysis, whether the tool is determined or not
+    ai_tool_clean = tolower(`AI Tool`),
+
+    identified_ai = ifelse(
+      ai_tool_clean == "implied" |
+        ai_tool_clean == "unidentified" |
+        is.na(ai_tool_clean),
+      0,
+      1
+    ),
+    
+    # For the categorical dataset
+    legal_field = factor(`Legal Field Primary`),
+    states = factor(`State(s)`),
+
+    # take year from date
+    year = year(Date),
+    
+    # change monetary from text to numerical data with units
+    monetary_amount = parse_number(`Monetary Penalty`),
+
+    # since there exist some monetary amount with no unit, can't compare
+    currency = ifelse(
+      str_detect(`Monetary Penalty`, "[A-Za-z]{3}$"),
+      toupper(str_sub(`Monetary Penalty`, -3, -1)),
+      NA_character_
+    )
+  )
+```
+
+
+## 1. Sanction Probability by Legal Fields
+
+For each legal field, the sanction probability is
+
+$$P(\text{sanction}=1 \mid \text{legal field}) = \frac{\text{number of sanctioned cases in the field}} {\text{total number of cases in the field}}.$$
+
+```{r}
+sanction_by_field <- data |>
+  group_by(legal_field) |>
+  summarise(
+    total_cases = n(),
+    sanction_probability = mean(sanction, na.rm = TRUE)
+  )
+
+sanction_by_field
+```
+
+The variable `sanction_probability` represents the proportion of sanctions in each legal field.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 5
+#| out-width: "100%"
+
+ggplot(
+  sanction_by_field |> filter(legal_field != "NA"),
+  aes(x = legal_field, y = sanction_probability)
+) +
+  geom_col() +
+  labs(
+    x = "Legal Field",
+    y = "Probability of Sanction",
+    title = "Probability of Professional Sanction by Legal Field"
+  )
+```
+
+```{r}
+#| fig-width: 10
+#| fig-height: 5
+#| out-width: "100%"
+
+ggplot(
+  data |> filter(
+    legal_field != "NA",
+    sanction == 1
+  ),
+  aes(x = legal_field)
+) +
+  geom_bar() +
+  labs(
+    x = "Legal Field",
+    y = "Count of Sanctions",
+    title = "Number of Professional Sanctions by Legal Field"
+  )
+```
+
+```{r}
+
+sanction_summary <- data |>
+  filter(!is.na(legal_field), legal_field != "NA") |>
+  group_by(legal_field) |>
+  summarize(
+    count = n(),
+    sanction_count = sum(sanction == 1, na.rm = TRUE),
+    sanction_proportion = mean(sanction == 1, na.rm = TRUE)
+  ) |>
+  arrange(desc(sanction_proportion))
+
+summary(sanction_summary$sanction_proportion)
+```
+
+With visualization for count, proportion, and numerical summary, we could conclude the trend related to legal_field and sanction. The sanction rate varies substantially across legal fields from 0% to 19.4%, with a mean of 8.58% and a median of 7.25%. Immigration (19.4%) and criminal cases (18.8%) have the highest sanction rates. Criminal cases are particularly notable because the high sanction rate is based on a relatively larger sample of 64 cases. In contrast, contract law has the largest number of sanctions, with 34 cases, but its sanction rate is only 7.56%, suggesting that the high count is due to the high frequency for contract legal field cases, instead of AI performance and understanding in this specific field.
+
+## Monetary Penalty Prediction
+
+This analysis examines whether the size of a monetary penalty can be predicted using information about the legal field, whether a specific AI tool was identified, and the year of the case.
+
+The monetary penalty variable contains multiple currencies. To make monetary amounts comparable, I only use cases where the currency is explicitly reported as USD. Cases with missing or zero monetary penalties are also removed.
+
+```{r}
+usd_data <- data |>
+  filter(
+    currency == "USD",
+    !is.na(monetary_amount),
+    monetary_amount > 0,
+    !is.na(legal_field),
+    legal_field != "NA",
+    !is.na(identified_ai),
+    !is.na(year)
+  )
+```
+
+### Distribution of Monetary Penalties
+
+First, I examine the distribution of monetary penalties.
+
+```{r}
+ggplot(
+  usd_data,
+  aes(x = monetary_amount)
+) +
+  geom_histogram() +
+  labs(
+    x = "Monetary Penalty (USD)",
+    y = "Count",
+    title = "Distribution of Monetary Penalties"
+  )
+```
+
+The monetary penalty variable is strongly right-skewed. Most penalties are relatively small, while a small number of cases have extremely large penalties. These extreme observations can have a large influence on a linear regression model.
+
+Therefore, I use the natural log of monetary penalty as the response variable.
+
+```{r}
+usd_data <- usd_data |>
+  mutate(
+    log_monetary_amount = log(monetary_amount)
+  )
+```
+
+```{r}
+ggplot(
+  usd_data,
+  aes(x = log_monetary_amount)
+) +
+  geom_histogram() +
+  labs(
+    x = "Log Monetary Penalty",
+    y = "Count",
+    title = "Distribution of Log Monetary Penalties"
+  )
+```
+
+After taking the log, the distribution is less strongly skewed. This makes linear regression more appropriate. So, we decided to have a linear regression on log value of monetary penalty.
+
+## Prediction Model
+
+The response variable is
+
+$$Y_i = \log(\text{Monetary Penalty}_i)$$
+
+The predictors are:
+
+- `legal_field`: the legal area associated with the case
+- `identified_ai`: whether a specific AI tool was identified
+- `year`: the year of the case
+
+The regression model is $$ \log( \text{Penalty}_i) = \beta_0 + \beta_1 \text{IdentifiedAI}_i + \beta_2\text{Year}_i + \beta_3\text{LegalField}_i + \epsilon_i$$
+
+I treat `year` as a categorical variable.
+
+### Training and Test Data
+
+To evaluate prediction performance, the model is fit using 80% of the data, and 20% for testing. 
+
+```{r}
+set.seed(123)
+
+train_index <- sample(
+  1:nrow(usd_data),
+  size = 0.8 * nrow(usd_data)
+)
+
+train <- usd_data[train_index, ]
+test <- usd_data[-train_index, ]
+
+monetary_model <- lm(
+  log_monetary_amount ~ identified_ai + factor(year) + legal_field,
+  data = train
+)
+
+summary(monetary_model)
+```
+
+The results show that monetary penalty does not have a clear relationship with AI identification, year, or legal field. Most of the variables are not statistically significant (with p value significantly higher than 0.1), and the estimates are fairly uncertain. Landlord-tenant is the only legal field with a significant result, but there are likely only a small number of cases in that group. 
+
+The model has an R-squared of about 0.10, meaning that it explains only around 10% of the variation in monetary penalties. The adjusted R-squared is slightly negative, which suggests that adding legal field, year, and AI identification does not improve the model comparing to using mean to predict.
+
+Overall, these variables do not seem to be very useful for explaining differences in monetary penalties.
+
+## Prediction Performance
+Next, I use the fitted model to predict monetary penalties for cases in the test set.
+
+```{r}
+predicted_log_penalty <- predict(
+  monetary_model,
+  newdata = test
+)
+```
+
+I calculate the test mean squared error.
+
+```{r}
+test_mse <- mean(
+  (test$log_monetary_amount - predicted_log_penalty)^2
+)
+
+test_mse
+sqrt(test_mse)
+```
+With the test set mean squared error equals to 7.79571 and SMSE equals to 2.79. This is a fairly large prediction error, suggesting that the model does not predict monetary penalties very accurately.
+
+## Conclusion
+Overall, the data shows that the fine of AI-related legal errors differ across cases. Immigration and criminal cases have the highest observed professional sanction rates. In contrast, monetary penalties are much harder to predict. Legal field, year, and whether the AI tool was identified explain only a small amount of the penalty size. These results suggest that legal field may be useful for understanding whether should we be more cautious in some field while using AI, but it's hard to predict the actual consequences. 
+
+## Limitation
+This analysis has several limitations. The dataset only includes documented cases, some legal fields have small sample sizes, and the monetary penalty analysis only uses USD cases. The regression also uses only a small number of predictors, so other important factors may be missing.
